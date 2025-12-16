@@ -14,6 +14,7 @@ from openai import OpenAI
 
 
 class SnapPicker(QPushButton):
+    # out - rectangle picked
     rect = Signal(int, int, int, int)
 
     def __init__(self, text: str, t: int, l: int, b: int, r: int) -> None:
@@ -21,6 +22,7 @@ class SnapPicker(QPushButton):
         self._text = text
         self._tl = t, l
         self._br = b, r
+
         self.apply()
 
     def mousePressEvent(self, e):
@@ -35,14 +37,13 @@ class SnapPicker(QPushButton):
                 if self._tl is None:
                     self._tl = pyautogui.position()
                     self.setText("Press SPACE for BR")
-                    return True
                 else:
                     QApplication.instance().removeEventFilter(self)
                     self._br = pyautogui.position()
                     self.rect.emit(*self._tl, *self._br)
                     self.apply()
                     self.setEnabled(True)
-                    return True
+                return True
         return False
 
     def apply(self):
@@ -53,12 +54,110 @@ class SnapPicker(QPushButton):
         return *self._tl, *self._br
 
 
+class Snapper(QObject):
+    """Captures screen"""
+    # in - set snap rectangle
+    rect = Signal(int, int, int, int)
+
+    # in - take a snapshot
+    snap = Signal()
+
+    # out - snapped image
+    image = Signal(str, int, int, QByteArray)
+    image_same = Signal()
+
+    def __init__(self, x1: int, y1: int, x2: int, y2: int) -> None:
+        super().__init__()
+        self.rect.connect(self.on_rect)
+        self.snap.connect(self.on_snap)
+        self._ref = np.zeros((32, 32), np.uint8)
+        self._rect = (x1, y1, x2, y2)
+
+    @Slot(int, int, int, int)
+    def on_rect(self, x1: int, y1: int, x2: int, y2: int):
+        self._rect = x1, y1, x2, y2
+        self.on_snap()
+
+    @Slot()
+    def on_snap(self):
+        img = ImageGrab.grab(self._rect).convert('RGB')
+
+        # check change
+        ref = np.array(img.convert('L').resize((32, 32), resample=Image.BICUBIC)).astype(np.uint8)
+        if (diff := np.abs(ref - self._ref).sum()) > 0:
+            print(f"Snap OK ({self._rect}, {diff})")
+            self.image.emit(img.mode, *img.size, QByteArray(img.tobytes()))
+            self._ref = ref
+        else:
+            self.image_same.emit()
+
+
+class QSnapLabel(QLabel):
+    # in - image to display
+    image = Signal(str, int, int, QByteArray)
+
+    # in - area to mark (use 0 area rect to delete mark)
+    mark = Signal(str, QRect)
+
+    # in - result to show
+    result = Signal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.image.connect(self.on_image)
+        self.mark.connect(self.on_mark)
+        self.result.connect(self.on_result)
+
+        self._image = None
+        self._marks = {}
+        self._result = ''
+
+    @Slot(str, int, int, QByteArray)
+    def on_image(self, mode: str, w: int, h: int, data: QByteArray):
+        if w * h > 0:
+            del self._image
+            img = Image.frombytes(mode, (w, h), data.data())
+            self._image = ImageQt(img)
+            self.apply()
+
+    @Slot(str, QRect)
+    def on_mark(self, key: str, mark: QRect):
+        if mark.height() * mark.width() == 0 and key in self._marks:
+            self._marks.pop(key)
+        else:
+            self._marks[key] = mark
+        self.apply()
+
+    @Slot(str)
+    def on_result(self, key: str):
+        self._result = key
+        self.apply()
+
+    def apply(self) -> None:
+        if self._image is not None:
+            self.setFixedSize(self._image.width(), self._image.height())
+            pmap = QPixmap.fromImage(self._image)
+            painter = QPainter(pmap)
+            painter.setPen(QPen(QColor('purple'), 5))
+            painter.setFont(QFont("Arial", 20))
+            for key, mark in self._marks.items():
+                if mark.height() * mark.width() > 0:
+                    if self._result and self._result != key and key != 'Q':
+                        painter.fillRect(mark, QBrush(QColor(10, 10, 10, 200)))
+                        painter.drawText(mark, Qt.AlignmentFlag.AlignLeft, key)
+                    else:
+                        painter.drawRect(mark)
+                        painter.drawText(mark, Qt.AlignmentFlag.AlignLeft, key)
+            self.setPixmap(pmap)
+
+
 class QColorPicker(QPushButton):
+    # out - color picked
     rgb = Signal(int, int, int)
 
     def __init__(self, text: str, r: int, g: int, b: int):
+        super().__init__()
         self._text = text
-        super().__init__(text)
         self._rgb = r, g, b
         self.apply()
 
@@ -87,102 +186,24 @@ class QColorPicker(QPushButton):
         return self._rgb
 
 
-class QSnapLabel(QLabel):
-    image = Signal(str, int, int, QByteArray)
-    rect = Signal(str, QRect)
-    result = Signal(str)
-
-    def __init__(self):
-        super().__init__()
-        self.image.connect(self.on_image)
-        self.rect.connect(self.on_rect)
-        self.result.connect(self.on_result)
-        self._image = None
-        self._rects = {}
-        self._result = ''
-
-    @Slot(str, int, int, QByteArray)
-    def on_image(self, mode: str, w: int, h: int, data: QByteArray):
-        if w * h > 0:
-            del self._image
-            img = Image.frombytes(mode, (w, h), data.data())
-            self._image = ImageQt(img)
-            self.draw()
-
-    @Slot(str, QRect)
-    def on_rect(self, key: str, rect: QRect):
-        self._rects[key.upper()] = rect
-        self.draw()
-
-    @Slot(str)
-    def on_result(self, key: str):
-        self._result = key.upper()
-        self.draw()
-
-    def draw(self) -> None:
-        if self._image is not None:
-            self.setFixedSize(self._image.width(), self._image.height())
-            pmap = QPixmap.fromImage(self._image)
-            painter = QPainter(pmap)
-            painter.setPen(QPen(QColor('purple'), 5))
-            painter.setFont(QFont("Arial", 20))
-            for key, rect in self._rects.items():
-                if rect.height() * rect.width() > 0:
-                    if self._result and self._result != key and key != 'Q':
-                        painter.fillRect(rect, QBrush(QColor(10, 10, 10, 200)))
-                        painter.drawText(rect, Qt.AlignmentFlag.AlignLeft, key)
-                    else:
-                        painter.drawRect(rect)
-                        painter.drawText(rect, Qt.AlignmentFlag.AlignLeft, key)
-            self.setPixmap(pmap)
-
-
-class Snapper(QObject):
-    """Captures screen"""
-    snap = Signal()
-    rect = Signal(int, int, int, int)
-
-    started = Signal()
-    image = Signal(str, int, int, QByteArray)
-    same = Signal()
-
-    def __init__(self, x1: int, y1: int, x2: int, y2: int) -> None:
-        super().__init__()
-        self.snap.connect(self.on_snap)
-        self.rect.connect(self.on_rect)
-        self._ref = np.zeros((32, 32), np.uint8)
-        self._rect = (x1, y1, x2, y2)
-
-    @Slot()
-    def on_snap(self):
-        print("Snapping...")
-        self.started.emit()
-        img = ImageGrab.grab(self._rect).convert('RGB')
-        ref = np.array(img.convert('L').resize((32, 32), resample=Image.BICUBIC)).astype(np.uint8)
-        if np.abs(ref - self._ref).sum() > 0:
-            print("Snap OK")
-            self.image.emit(img.mode, *img.size, QByteArray(img.tobytes()))
-            self._ref = ref
-        else:
-            print("Snap same")
-            self.same.emit()
-
-    @Slot(int, int, int, int)
-    def on_rect(self, x1: int, y1: int, x2: int, y2: int):
-        self._rect = x1, y1, x2, y2
-        self.on_snap()
-
-
 class ColorFinder(QObject):
     """Locates region of interest and runs OCR on it"""
+    # in - image to analyse
     image = Signal(str, int, int, QByteArray)
-    rect = Signal(str, QRect)
+
+    # in - color to search
     rgb = Signal(int, int, int)
+
+    # in - value to crop
     cropx = Signal(int)
 
+    # out - area to mark
+    mark = Signal(str, QRect)
+    mark_too_small = Signal()
+    mark_color_not_found = Signal()
+
+    # out - recognized text
     txt = Signal(str)
-    toosmall = Signal()
-    colornotfound = Signal()
 
     def __init__(self, name: str, rgb: Tuple[int, int, int], cselect: Callable, cropx: int = 0, accuracy=0.05) -> None:
         super().__init__()
@@ -193,21 +214,8 @@ class ColorFinder(QObject):
         self._accuracy = accuracy
 
         self.image.connect(self.on_image)
-        self.rect.connect(self.on_rect)
         self.rgb.connect(self.on_rgb)
         self.cropx.connect(self.on_cropx)
-
-    @Slot(str, QRect)
-    def on_rect(self, name: str, rect: QRect):
-        pass
-
-    @Slot(int, int, int)
-    def on_rgb(self, r: int, g: int, b: int):
-        self._hsv = cv2.cvtColor(np.uint8([[[r, g, b]]]), cv2.COLOR_RGB2HSV)[0, 0]
-
-    @Slot(int)
-    def on_cropx(self, cropx: int):
-        self._cropx = cropx
 
     @staticmethod
     def get_mask(hsv: Tuple[int, int, int], accuracy: float, hsvframe: np.ndarray) -> np.ndarray:
@@ -224,7 +232,6 @@ class ColorFinder(QObject):
 
     @Slot(str, int, int, QByteArray)
     def on_image(self, mode: str, w: int, h: int, data: QByteArray):
-        print(f"{self._name} Colorfinding ({self._hsv}, {self._cropx})...")
         img = Image.frombytes(mode, (w, h), data.data())
 
         bgrframe = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
@@ -246,42 +253,53 @@ class ColorFinder(QObject):
         # Creating contour to track color
         contours, hierarchy = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
-            print(f"{self._name} Color not found")
-            self.rect.emit(self._name, QRect(0, 0, 0, 0))
+            print(f"{self._name} Color not found ({self._hsv})")
+            self.mark.emit(self._name, QRect(0, 0, 0, 0))  # delete existing mark
             self.txt.emit('')
-            self.colornotfound.emit()
+            self.mark_color_not_found.emit()
             return
 
         # Select
-
         if (contour := self._cselect(contours)) is None or cv2.contourArea(contour) == 0:
             print(f"{self._name} No match")
-            self.rect.emit(self._name, QRect(0, 0, 0, 0))
+            self.mark.emit(self._name, QRect(0, 0, 0, 0))  # delete existing mark
             self.txt.emit('')
             return
 
         x, y, w, h = cv2.boundingRect(contour)
-        print(f"{self._name} Rect found {x} {y} {w} {h}")
-        self.rect.emit(self._name, QRect(x + self._cropx, y, w - self._cropx, h))
+        print(f"{self._name} Mark found {x} {y} {w} {h}")
+        self.mark.emit(self._name, QRect(x + self._cropx, y, w - self._cropx, h))
 
         cropframe = cv2.cvtColor(bgrframe[y:y + h, min(x + self._cropx, x + w - 2):x + w], cv2.COLOR_BGR2GRAY)
         txt = pytesseract.image_to_string(cropframe).replace('\n', ' ').strip()
         print(f"{self._name} OCR OK: '{txt}'")
         self.txt.emit(txt)
 
+    @Slot(int, int, int)
+    def on_rgb(self, r: int, g: int, b: int):
+        self._hsv = cv2.cvtColor(np.uint8([[[r, g, b]]]), cv2.COLOR_RGB2HSV)[0, 0]
+
+    @Slot(int)
+    def on_cropx(self, cropx: int):
+        self._cropx = cropx
+
 
 class Chatter(QObject):
     """Asks ChatGPT and retreives the response"""
 
-    question = Signal(str)  # Text read
+    # in - prompt parts
+    question = Signal(str)
     answer_a = Signal(str)
     answer_b = Signal(str)
     answer_c = Signal(str)
     answer_d = Signal(str)
 
+    # out - prompt
     prompt = Signal(str)
-    same = Signal()
-    invalid = Signal()
+    prompt_same = Signal()
+    prompt_invalid = Signal()
+
+    # out - result
     result = Signal(str)
 
     def __init__(self) -> None:
@@ -340,14 +358,13 @@ class Chatter(QObject):
             print(
                 f"ChatGPT invalid: {self._question}, {self._answer_a}, {self._answer_b}, {self._answer_c}, {self._answer_d}")
             self._question = self._answer_a = self._answer_b = self._answer_c = self._answer_d = None
-            self.invalid.emit()
+            self.prompt_invalid.emit()
             return
 
         self._question = self._answer_a = self._answer_b = self._answer_c = self._answer_d = None
 
         if prompt == self._ref:
-            print(f"ChatGPT same ({prompt})")
-            self.same.emit()
+            self.prompt_same.emit()
             return
 
         self._ref = prompt
@@ -363,13 +380,17 @@ class Chatter(QObject):
                 result = response.output_text
             else:
                 print(f"ChatGPT invalid result: {response.output_text}")
-                self.invalid.emit()
+                self.prompt_invalid.emit()
                 return
         else:
             result = 'A'
 
         print(f"ChatGPT result ({result})")
         self.result.emit(result)
+
+
+class QPrompt(QLabel):
+    pass
 
 
 class Window(QtWidgets.QWidget):
@@ -438,11 +459,25 @@ class Window(QtWidgets.QWidget):
         self.snap.setStyleSheet("border: 1px solid black")
         layout.addWidget(self.snap)
 
+        layout_colorfinder = QGridLayout()
+        layout.addLayout(layout_colorfinder)
+
+        self.question = QLabel()
+        layout_colorfinder.addWidget(self.question, 0, 0)
+        self.answer_a = QLabel()
+        layout_colorfinder.addWidget(self.answer_a, 1, 0)
+        self.answer_b = QLabel()
+        layout_colorfinder.addWidget(self.answer_b, 1, 1)
+        self.answer_c = QLabel()
+        layout_colorfinder.addWidget(self.answer_c, 2, 0)
+        self.answer_d = QLabel()
+        layout_colorfinder.addWidget(self.answer_d, 2, 1)
+
         layout_result = QGridLayout()
         layout.addLayout(layout_result)
 
-        self.prompt = QLabel("Prompt: ---")
-        self.result = QLabel("Result: ---")
+        self.prompt = QLabel()
+        self.result = QLabel()
         self.stop = QPushButton("Stop")
         layout_result.addWidget(self.prompt, 0, 0)
         layout_result.addWidget(self.result, 1, 0)
@@ -470,17 +505,17 @@ class Window(QtWidgets.QWidget):
         # Connect signals
         self.snappicker.rect.connect(self.snapper.rect)
         # self.stop.clicked.connect(self.snapper.snap)
-        self.snapper.same.connect(self.snapper.snap)  # loop
+        self.snapper.image_same.connect(self.snapper.snap)  # loop
         self.chatter.result.connect(self.snapper.snap)  # loop
-        self.chatter.same.connect(self.snapper.snap)  # loop
-        self.chatter.invalid.connect(self.snapper.snap)  # loop
+        self.chatter.prompt_same.connect(self.snapper.snap)  # loop
+        self.chatter.prompt_invalid.connect(self.snapper.snap)  # loop
 
         self.snapper.image.connect(self.snap.image)
-        self.colorfinder_q.rect.connect(self.snap.rect)
-        self.colorfinder_a.rect.connect(self.snap.rect)
-        self.colorfinder_b.rect.connect(self.snap.rect)
-        self.colorfinder_c.rect.connect(self.snap.rect)
-        self.colorfinder_d.rect.connect(self.snap.rect)
+        self.colorfinder_q.mark.connect(self.snap.mark)
+        self.colorfinder_a.mark.connect(self.snap.mark)
+        self.colorfinder_b.mark.connect(self.snap.mark)
+        self.colorfinder_c.mark.connect(self.snap.mark)
+        self.colorfinder_d.mark.connect(self.snap.mark)
         self.chatter.result.connect(self.snap.result)
 
         self.snapper.image.connect(self.colorfinder_q.image)
@@ -500,8 +535,27 @@ class Window(QtWidgets.QWidget):
         self.colorfinder_c.txt.connect(self.chatter.answer_c)
         self.colorfinder_d.txt.connect(self.chatter.answer_d)
 
+        self.colorfinder_q.txt.connect(self.question.setText)
+        self.colorfinder_q.mark_color_not_found.connect(self.question.clear)
+        self.colorfinder_q.mark_too_small.connect(self.question.clear)
+        self.colorfinder_a.txt.connect(self.answer_a.setText)
+        self.colorfinder_a.mark_color_not_found.connect(self.answer_a.clear)
+        self.colorfinder_a.mark_too_small.connect(self.answer_a.clear)
+        self.colorfinder_b.txt.connect(self.answer_b.setText)
+        self.colorfinder_b.mark_color_not_found.connect(self.answer_b.clear)
+        self.colorfinder_b.mark_too_small.connect(self.answer_b.clear)
+        self.colorfinder_c.txt.connect(self.answer_c.setText)
+        self.colorfinder_c.mark_color_not_found.connect(self.answer_c.clear)
+        self.colorfinder_c.mark_too_small.connect(self.answer_c.clear)
+        self.colorfinder_d.txt.connect(self.answer_d.setText)
+        self.colorfinder_d.mark_color_not_found.connect(self.answer_d.clear)
+        self.colorfinder_d.mark_too_small.connect(self.answer_d.clear)
+
         self.chatter.prompt.connect(self.prompt.setText)
+        self.chatter.prompt_invalid.connect(self.prompt.clear)
+
         self.chatter.result.connect(self.result.setText)
+        self.chatter.prompt_invalid.connect(self.result.clear)
 
         # Threads
         self.snapper_thread = QThread()
