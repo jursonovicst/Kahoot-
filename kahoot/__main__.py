@@ -7,8 +7,7 @@ import pytesseract
 from PIL import ImageGrab, Image, ImageQt
 from PIL.ImageQt import ImageQt
 from PyQt6 import QtWidgets
-from PyQt6.QtCore import pyqtSignal as Signal, pyqtSlot as Slot, QRect, QByteArray, Qt, QObject, \
-    QThread
+from PyQt6.QtCore import pyqtSignal as Signal, pyqtSlot as Slot, QRect, QByteArray, Qt, QObject, QThread
 from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QBrush, QKeyEvent, QFont
 from PyQt6.QtWidgets import QPushButton, QLabel, QGridLayout, QApplication, QSlider
 from openai import OpenAI
